@@ -280,6 +280,8 @@ export const BackgroundTaskConfigSchema = z.object({
   modelConcurrency: z.record(z.string(), z.number().min(1)).optional(),
   /** Stale timeout in milliseconds - interrupt tasks with no activity for this duration (default: 180000 = 3 minutes, minimum: 60000 = 1 minute) */
   staleTimeoutMs: z.number().min(60000).optional(),
+  /** Maximum recursion depth for background tasks (default: 2) */
+  max_depth: z.number().min(0).optional(),
 })
 
 export const NotificationConfigSchema = z.object({
