@@ -180,22 +180,28 @@ cd ~/omo-custom
 ```
 
 The script automatically:
-1. `git fetch upstream --tags` - Fetch latest tags
-2. Create new branch based on latest tag
-3. Apply patches
-4. `bun install && bun run build`
+1. Add `upstream` remote if not exists (points to official oh-my-opencode repo)
+2. `git fetch upstream --tags` - Fetch latest tags
+3. Backup patch files to `~/tmp/` (survives branch switch)
+4. Create new branch based on latest tag
+5. Apply patches from `~/tmp/`
+6. `bun install && bun run build`
 
 ### Resolving Patch Conflicts
 
-If the patch fails to apply:
+If the patch fails to apply (upstream code changed significantly):
 
 ```bash
 # If script fails, proceed manually
+# First, backup patch to ~/tmp/ (script does this automatically)
+cp patches/max-depth-feature.patch ~/tmp/
+
+# Checkout the new version
 LATEST=$(git tag -l 'v*' --sort=-v:refname | head -1)
 git checkout -b custom-$LATEST $LATEST
 
 # Try patch with 3-way merge
-git apply --3way patches/max-depth-feature.patch
+git apply --3way ~/tmp/max-depth-feature.patch
 
 # If conflict occurs, resolve manually
 vim src/features/background-agent/manager.ts
@@ -207,9 +213,10 @@ git commit -m "feat: add max_depth config for background task recursion limit"
 # Build
 bun install && bun run build
 
-# Update patch file
-git diff $LATEST -- src/ > patches/max-depth-feature.patch
+# Update patch file in main branch
+git diff $LATEST -- src/ > ~/tmp/max-depth-feature.patch
 git checkout main
+cp ~/tmp/max-depth-feature.patch patches/max-depth-feature.patch
 git add patches/max-depth-feature.patch
 git commit -m "Update patch for $LATEST"
 git push origin main
@@ -293,6 +300,8 @@ cat ~/.config/opencode/opencode.json
 ```
 
 ### Missing upstream Remote
+
+The script automatically adds upstream remote if missing. If you need to do it manually:
 
 ```bash
 git remote add upstream https://github.com/code-yeongyu/oh-my-opencode.git
