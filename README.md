@@ -29,9 +29,11 @@ cd ~/omo-custom
 
 This will:
 1. Fetch the latest tag from upstream
-2. Create a patched branch `custom-vX.X.X`
-3. Apply the patch
-4. Build the plugin (`bun run build`)
+2. Skip if already on the latest version
+3. Create a patched branch `custom-vX.X.X`
+4. Apply the patch
+5. Build the plugin (`bun run build`)
+6. Auto-commit all changes to the new branch
 
 ## OpenCode Plugin Setup
 
