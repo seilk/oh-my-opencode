@@ -23,6 +23,12 @@ if [ -z "$LATEST_TAG" ]; then
 fi
 echo "Latest tag: $LATEST_TAG"
 
+CURRENT_VERSION=$(git branch -l 'custom-v*' --sort=-v:refname | head -1 | sed 's/.*custom-\(v[0-9.a-z-]*\)/\1/')
+if [ "$CURRENT_VERSION" = "$LATEST_TAG" ]; then
+    echo "Already up to date: $LATEST_TAG"
+    exit 0
+fi
+
 echo "=== Backing up patch ==="
 cp "$REPO_DIR/patches/max-depth-feature.patch" "$TMP_DIR/max-depth-feature.patch"
 
