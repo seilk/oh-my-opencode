@@ -29,7 +29,17 @@ cp "$REPO_DIR/patches/max-depth-feature.patch" "$TMP_DIR/max-depth-feature.patch
 BRANCH_NAME="custom-${LATEST_TAG}"
 echo "=== Creating branch: $BRANCH_NAME ==="
 
-git stash 2>/dev/null || true
+# Auto-commit changes before switching branch
+CURRENT_BRANCH=$(git branch --show-current)
+if [ "$CURRENT_BRANCH" != "main" ]; then
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        echo "=== Auto-committing changes on $CURRENT_BRANCH ==="
+        git add -A
+        git commit -m "chore: auto-save before upgrade"
+    fi
+    git checkout main
+fi
+
 if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
     git checkout "$BRANCH_NAME"
     git reset --hard "$LATEST_TAG"
