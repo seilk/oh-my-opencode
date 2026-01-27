@@ -2736,6 +2736,10 @@
         "staleTimeoutMs": {
           "type": "number",
           "minimum": 60000
+        },
+        "max_depth": {
+          "type": "number",
+          "minimum": 0
         }
       }
     },

@@ -115,6 +115,10 @@ export class BackgroundManager {
       throw new Error("Agent parameter is required")
     }
 
+    // Calculate depth from parent task
+    const parentTask = this.findBySession(input.parentSessionID)
+    const currentDepth = (parentTask?.depth ?? 0) + 1
+
     // Create task immediately with status="pending"
     const task: BackgroundTask = {
       id: `bg_${crypto.randomUUID().slice(0, 8)}`,
@@ -130,6 +134,7 @@ export class BackgroundManager {
       parentModel: input.parentModel,
       parentAgent: input.parentAgent,
       model: input.model,
+      depth: currentDepth,
     }
 
     this.tasks.set(task.id, task)
@@ -304,7 +309,7 @@ export class BackgroundManager {
           ...getAgentToolRestrictions(input.agent),
           task: false,
           delegate_task: false,
-          call_omo_agent: true,
+          call_omo_agent: (task.depth ?? 1) < (this.config?.max_depth ?? 2),
           question: false,
         },
         parts: [{ type: "text", text: input.prompt }],
@@ -430,6 +435,10 @@ export class BackgroundManager {
 
     const concurrencyGroup = input.concurrencyKey ?? input.agent ?? "delegate_task"
 
+    // Calculate depth for external task
+    const parentTask = this.findBySession(input.parentSessionID)
+    const currentDepth = (parentTask?.depth ?? 0) + 1
+
     // Acquire concurrency slot if a key is provided
     if (input.concurrencyKey) {
       await this.concurrencyManager.acquire(input.concurrencyKey)
@@ -452,6 +461,7 @@ export class BackgroundManager {
       parentAgent: input.parentAgent,
       concurrencyKey: input.concurrencyKey,
       concurrencyGroup,
+      depth: currentDepth,
     }
 
     this.tasks.set(task.id, task)
@@ -551,7 +561,7 @@ export class BackgroundManager {
           ...getAgentToolRestrictions(existingTask.agent),
           task: false,
           delegate_task: false,
-          call_omo_agent: true,
+          call_omo_agent: (existingTask.depth ?? 1) < (this.config?.max_depth ?? 2),
           question: false,
         },
         parts: [{ type: "text", text: input.prompt }],
