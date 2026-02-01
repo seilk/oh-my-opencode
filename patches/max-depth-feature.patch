@@ -1,8 +1,8 @@
 diff --git a/src/config/schema.ts b/src/config/schema.ts
-index 08e5a1f..106c8ac 100644
+index 4d4f5fc..8c5dc2c 100644
 --- a/src/config/schema.ts
 +++ b/src/config/schema.ts
-@@ -299,6 +299,8 @@ export const BackgroundTaskConfigSchema = z.object({
+@@ -305,6 +305,8 @@ export const BackgroundTaskConfigSchema = z.object({
    modelConcurrency: z.record(z.string(), z.number().min(0)).optional(),
    /** Stale timeout in milliseconds - interrupt tasks with no activity for this duration (default: 180000 = 3 minutes, minimum: 60000 = 1 minute) */
    staleTimeoutMs: z.number().min(60000).optional(),
@@ -12,10 +12,10 @@ index 08e5a1f..106c8ac 100644
  
  export const NotificationConfigSchema = z.object({
 diff --git a/src/features/background-agent/manager.ts b/src/features/background-agent/manager.ts
-index d7bf047..6770779 100644
+index 28b5b6e..37f379e 100644
 --- a/src/features/background-agent/manager.ts
 +++ b/src/features/background-agent/manager.ts
-@@ -115,6 +115,10 @@ export class BackgroundManager {
+@@ -123,6 +123,10 @@ export class BackgroundManager {
        throw new Error("Agent parameter is required")
      }
  
@@ -26,15 +26,15 @@ index d7bf047..6770779 100644
      // Create task immediately with status="pending"
      const task: BackgroundTask = {
        id: `bg_${crypto.randomUUID().slice(0, 8)}`,
-@@ -130,6 +134,7 @@ export class BackgroundManager {
-       parentModel: input.parentModel,
+@@ -139,6 +143,7 @@ export class BackgroundManager {
        parentAgent: input.parentAgent,
        model: input.model,
+       category: input.category,
 +      depth: currentDepth,
      }
  
      this.tasks.set(task.id, task)
-@@ -304,7 +309,7 @@ export class BackgroundManager {
+@@ -329,7 +334,7 @@ export class BackgroundManager {
            ...getAgentToolRestrictions(input.agent),
            task: false,
            delegate_task: false,
@@ -43,7 +43,7 @@ index d7bf047..6770779 100644
            question: false,
          },
          parts: [{ type: "text", text: input.prompt }],
-@@ -430,6 +435,10 @@ export class BackgroundManager {
+@@ -455,6 +460,10 @@ export class BackgroundManager {
  
      const concurrencyGroup = input.concurrencyKey ?? input.agent ?? "delegate_task"
  
@@ -54,7 +54,7 @@ index d7bf047..6770779 100644
      // Acquire concurrency slot if a key is provided
      if (input.concurrencyKey) {
        await this.concurrencyManager.acquire(input.concurrencyKey)
-@@ -452,6 +461,7 @@ export class BackgroundManager {
+@@ -477,6 +486,7 @@ export class BackgroundManager {
        parentAgent: input.parentAgent,
        concurrencyKey: input.concurrencyKey,
        concurrencyGroup,
@@ -62,7 +62,7 @@ index d7bf047..6770779 100644
      }
  
      this.tasks.set(task.id, task)
-@@ -551,7 +561,7 @@ export class BackgroundManager {
+@@ -583,7 +593,7 @@ export class BackgroundManager {
            ...getAgentToolRestrictions(existingTask.agent),
            task: false,
            delegate_task: false,
@@ -72,10 +72,10 @@ index d7bf047..6770779 100644
          },
          parts: [{ type: "text", text: input.prompt }],
 diff --git a/src/features/background-agent/types.ts b/src/features/background-agent/types.ts
-index 84c71a4..40ceb60 100644
+index 553f5bb..6bd298d 100644
 --- a/src/features/background-agent/types.ts
 +++ b/src/features/background-agent/types.ts
-@@ -41,6 +41,8 @@ export interface BackgroundTask {
+@@ -45,6 +45,8 @@ export interface BackgroundTask {
    lastMsgCount?: number
    /** Number of consecutive polls with stable message count */
    stablePolls?: number
