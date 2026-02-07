@@ -1,8 +1,8 @@
 diff --git a/src/config/schema.ts b/src/config/schema.ts
-index 4d4f5fc..8c5dc2c 100644
+index 34ec376b..717c9de4 100644
 --- a/src/config/schema.ts
 +++ b/src/config/schema.ts
-@@ -305,6 +305,8 @@ export const BackgroundTaskConfigSchema = z.object({
+@@ -328,6 +328,8 @@ export const BackgroundTaskConfigSchema = z.object({
    modelConcurrency: z.record(z.string(), z.number().min(0)).optional(),
    /** Stale timeout in milliseconds - interrupt tasks with no activity for this duration (default: 180000 = 3 minutes, minimum: 60000 = 1 minute) */
    staleTimeoutMs: z.number().min(60000).optional(),
@@ -12,10 +12,10 @@ index 4d4f5fc..8c5dc2c 100644
  
  export const NotificationConfigSchema = z.object({
 diff --git a/src/features/background-agent/manager.ts b/src/features/background-agent/manager.ts
-index 28b5b6e..37f379e 100644
+index e631f30a..2944db72 100644
 --- a/src/features/background-agent/manager.ts
 +++ b/src/features/background-agent/manager.ts
-@@ -123,6 +123,10 @@ export class BackgroundManager {
+@@ -124,6 +124,10 @@ export class BackgroundManager {
        throw new Error("Agent parameter is required")
      }
  
@@ -26,7 +26,7 @@ index 28b5b6e..37f379e 100644
      // Create task immediately with status="pending"
      const task: BackgroundTask = {
        id: `bg_${crypto.randomUUID().slice(0, 8)}`,
-@@ -139,6 +143,7 @@ export class BackgroundManager {
+@@ -140,6 +144,7 @@ export class BackgroundManager {
        parentAgent: input.parentAgent,
        model: input.model,
        category: input.category,
@@ -35,17 +35,17 @@ index 28b5b6e..37f379e 100644
  
      this.tasks.set(task.id, task)
 @@ -329,7 +334,7 @@ export class BackgroundManager {
+         tools: {
            ...getAgentToolRestrictions(input.agent),
            task: false,
-           delegate_task: false,
 -          call_omo_agent: true,
 +          call_omo_agent: (task.depth ?? 1) < (this.config?.max_depth ?? 2),
            question: false,
          },
          parts: [{ type: "text", text: input.prompt }],
-@@ -455,6 +460,10 @@ export class BackgroundManager {
+@@ -461,6 +466,10 @@ export class BackgroundManager {
  
-     const concurrencyGroup = input.concurrencyKey ?? input.agent ?? "delegate_task"
+     const concurrencyGroup = input.concurrencyKey ?? input.agent ?? "task"
  
 +    // Calculate depth for external task
 +    const parentTask = this.findBySession(input.parentSessionID)
@@ -54,7 +54,7 @@ index 28b5b6e..37f379e 100644
      // Acquire concurrency slot if a key is provided
      if (input.concurrencyKey) {
        await this.concurrencyManager.acquire(input.concurrencyKey)
-@@ -477,6 +486,7 @@ export class BackgroundManager {
+@@ -483,6 +492,7 @@ export class BackgroundManager {
        parentAgent: input.parentAgent,
        concurrencyKey: input.concurrencyKey,
        concurrencyGroup,
@@ -62,17 +62,17 @@ index 28b5b6e..37f379e 100644
      }
  
      this.tasks.set(task.id, task)
-@@ -583,7 +593,7 @@ export class BackgroundManager {
+@@ -588,7 +598,7 @@ export class BackgroundManager {
+         tools: {
            ...getAgentToolRestrictions(existingTask.agent),
            task: false,
-           delegate_task: false,
 -          call_omo_agent: true,
 +          call_omo_agent: (existingTask.depth ?? 1) < (this.config?.max_depth ?? 2),
            question: false,
          },
          parts: [{ type: "text", text: input.prompt }],
 diff --git a/src/features/background-agent/types.ts b/src/features/background-agent/types.ts
-index 553f5bb..6bd298d 100644
+index 553f5bb5..6bd298df 100644
 --- a/src/features/background-agent/types.ts
 +++ b/src/features/background-agent/types.ts
 @@ -45,6 +45,8 @@ export interface BackgroundTask {
