@@ -129,6 +129,10 @@ export class BackgroundManager {
       throw new Error("Agent parameter is required")
     }
 
+    // Calculate depth from parent task
+    const parentTask = input.parentSessionID ? this.findBySession(input.parentSessionID) : undefined
+    const currentDepth = input.parentSessionID ? (parentTask?.depth ?? 0) + 1 : 0
+
     // Create task immediately with status="pending"
     const task: BackgroundTask = {
       id: `bg_${crypto.randomUUID().slice(0, 8)}`,
@@ -146,6 +150,7 @@ export class BackgroundManager {
       parentTools: input.parentTools,
       model: input.model,
       category: input.category,
+      depth: currentDepth,
     }
 
     this.tasks.set(task.id, task)
@@ -335,7 +340,7 @@ export class BackgroundManager {
           const tools = {
             ...getAgentToolRestrictions(input.agent),
             task: false,
-            call_omo_agent: true,
+            call_omo_agent: (task.depth ?? 0) < (this.config?.max_depth ?? 2),
             question: false,
           }
           setSessionTools(sessionID, tools)
@@ -470,6 +475,10 @@ export class BackgroundManager {
 
     const concurrencyGroup = input.concurrencyKey ?? input.agent ?? "task"
 
+    // Calculate depth for external task
+    const parentTask = input.parentSessionID ? this.findBySession(input.parentSessionID) : undefined
+    const currentDepth = input.parentSessionID ? (parentTask?.depth ?? 0) + 1 : 0
+
     // Acquire concurrency slot if a key is provided
     if (input.concurrencyKey) {
       await this.concurrencyManager.acquire(input.concurrencyKey)
@@ -492,6 +501,7 @@ export class BackgroundManager {
       parentAgent: input.parentAgent,
       concurrencyKey: input.concurrencyKey,
       concurrencyGroup,
+      depth: currentDepth,
     }
 
     this.tasks.set(task.id, task)
@@ -539,6 +549,11 @@ export class BackgroundManager {
     existingTask.completedAt = undefined
     existingTask.error = undefined
     existingTask.parentSessionID = input.parentSessionID
+
+    // Update depth from the new parent session (best-effort)
+    const parentTask = input.parentSessionID ? this.findBySession(input.parentSessionID) : undefined
+    existingTask.depth = input.parentSessionID ? (parentTask?.depth ?? 0) + 1 : 0
+
     existingTask.parentMessageID = input.parentMessageID
     existingTask.parentModel = input.parentModel
     existingTask.parentAgent = input.parentAgent
@@ -602,7 +617,7 @@ export class BackgroundManager {
           const tools = {
             ...getAgentToolRestrictions(existingTask.agent),
             task: false,
-            call_omo_agent: true,
+            call_omo_agent: (existingTask.depth ?? 0) < (this.config?.max_depth ?? 2),
             question: false,
           }
           setSessionTools(existingTask.sessionID!, tools)

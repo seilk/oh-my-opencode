@@ -48,6 +48,9 @@ export interface BackgroundTask {
   lastMsgCount?: number
   /** Number of consecutive polls with stable message count */
   stablePolls?: number
+
+  /** Recursion depth of the task (0 for root tasks) */
+  depth?: number
 }
 
 export interface LaunchInput {
