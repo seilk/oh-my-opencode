@@ -9,6 +9,7 @@ dist/
 packages/
 
 # Logs
+logs/
 *.log
 
 # macOS
