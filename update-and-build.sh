@@ -1,130 +1,127 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-TMP_DIR="$HOME/tmp"
+# update-and-build.sh
+#
+# This repo is a thin wrapper that stores local patches, and builds an upstream
+# oh-my-opencode checkout in a *separate git worktree*.
+#
+# Why:
+# - Avoids dirty working tree / branch checkout failures on this wrapper repo
+# - Keeps a stable plugin directory for OpenCode
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PATCH_PATH="$REPO_DIR/patches/max-depth-feature.patch"
+PLUGIN_DIR="$REPO_DIR/plugin"
 
 cd "$REPO_DIR"
 
 # =============================================================================
 # Install bun if not available
 # =============================================================================
-if ! command -v bun &> /dev/null; then
-    echo "=== Installing bun ==="
-    curl -fsSL https://bun.sh/install | bash
-    export BUN_INSTALL="$HOME/.bun"
-    export PATH="$BUN_INSTALL/bin:$PATH"
-    echo "Bun installed: $(bun --version)"
+if ! command -v bun >/dev/null 2>&1; then
+  echo "=== Installing bun ==="
+  curl -fsSL https://bun.sh/install | bash
+  export BUN_INSTALL="$HOME/.bun"
+  export PATH="$BUN_INSTALL/bin:$PATH"
+  echo "Bun installed: $(bun --version)"
 fi
-
-mkdir -p "$TMP_DIR"
 
 # =============================================================================
 # Setup upstream remote
 # =============================================================================
-if ! git remote get-url upstream &>/dev/null; then
-    echo "=== Adding upstream remote ==="
-    git remote add upstream https://github.com/code-yeongyu/oh-my-opencode.git
+if ! git remote get-url upstream >/dev/null 2>&1; then
+  echo "=== Adding upstream remote ==="
+  git remote add upstream https://github.com/code-yeongyu/oh-my-opencode.git
 fi
 
 echo "=== Fetching latest from upstream ==="
 git fetch upstream --tags
 
-LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
-if [ -z "$LATEST_TAG" ]; then
-    echo "ERROR: No tags found. Make sure upstream is accessible."
-    exit 1
+LATEST_TAG="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+if [[ -z "$LATEST_TAG" ]]; then
+  echo "ERROR: No tags found. Make sure upstream is accessible." >&2
+  exit 1
 fi
-echo "Latest tag: $LATEST_TAG"
 
-# =============================================================================
-# Check if already up to date
-# =============================================================================
 BRANCH_NAME="custom-${LATEST_TAG}"
-CURRENT_BRANCH=$(git branch --show-current)
+VERSION="${LATEST_TAG#v}"
 
-# If already on the target branch and dist/ exists, skip
-if [ "$CURRENT_BRANCH" = "$BRANCH_NAME" ] && [ -f "$REPO_DIR/dist/index.js" ]; then
-    echo "Already up to date: $LATEST_TAG"
-    echo ""
-    echo "=== Ready to use ==="
-    echo "Add to ~/.config/opencode/opencode.json:"
-    echo "  \"plugin\": [\"$REPO_DIR\"]"
-    exit 0
-fi
+echo "Latest tag: $LATEST_TAG"
+echo "Target branch: $BRANCH_NAME"
 
 # =============================================================================
-# Backup patch and create branch
+# Ensure plugin worktree exists (or refresh it)
 # =============================================================================
-echo "=== Backing up patch ==="
-cp "$REPO_DIR/patches/max-depth-feature.patch" "$TMP_DIR/max-depth-feature.patch"
-
-echo "=== Creating branch: $BRANCH_NAME ==="
-
-if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
-    git checkout "$BRANCH_NAME"
-    # If dist/ already exists, just rebuild
-    if [ -f "$REPO_DIR/dist/index.js" ]; then
-        echo "Branch exists with build. Rebuilding..."
-        bun install
-        bun run build
-        echo ""
-        echo "=== Done ==="
-        echo "Add to ~/.config/opencode/opencode.json:"
-        echo "  \"plugin\": [\"$REPO_DIR\"]"
-        exit 0
-    fi
-    git reset --hard "$LATEST_TAG"
+if [[ ! -d "$PLUGIN_DIR" ]]; then
+  echo "=== Creating plugin worktree: $PLUGIN_DIR ==="
+  git worktree add "$PLUGIN_DIR" -b "$BRANCH_NAME" "$LATEST_TAG"
 else
-    git checkout -b "$BRANCH_NAME" "$LATEST_TAG"
+  # Ensure this is a worktree of this repo
+  if ! git -C "$PLUGIN_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "ERROR: '$PLUGIN_DIR' exists but is not a git worktree." >&2
+    echo "Move it aside and re-run." >&2
+    exit 1
+  fi
+
+  echo "=== Refreshing plugin worktree ==="
+  # Make sure we can switch branches deterministically
+  git -C "$PLUGIN_DIR" reset --hard
+  git -C "$PLUGIN_DIR" clean -fdx
+  git -C "$PLUGIN_DIR" checkout -B "$BRANCH_NAME" "$LATEST_TAG"
 fi
 
 # =============================================================================
-# Apply patch
+# Apply patch in plugin worktree
 # =============================================================================
 echo "=== Applying patch ==="
-if git apply --check "$TMP_DIR/max-depth-feature.patch" 2>/dev/null; then
-    git apply "$TMP_DIR/max-depth-feature.patch"
+if git -C "$PLUGIN_DIR" apply --check "$PATCH_PATH" >/dev/null 2>&1; then
+  git -C "$PLUGIN_DIR" apply "$PATCH_PATH"
 else
-    echo "Trying 3-way merge..."
-    git apply --3way "$TMP_DIR/max-depth-feature.patch" || {
-        echo "ERROR: Patch failed. Manual intervention required."
-        exit 1
-    }
+  echo "Patch did not apply cleanly; trying 3-way..."
+  git -C "$PLUGIN_DIR" apply --3way "$PATCH_PATH" || {
+    echo "ERROR: Patch failed. Manual intervention required." >&2
+    exit 1
+  }
 fi
 
 # =============================================================================
-# Build
+# Build in plugin worktree
 # =============================================================================
-echo "=== Installing dependencies ==="
-bun install
+echo "=== Installing dependencies (plugin worktree) ==="
+(
+  cd "$PLUGIN_DIR"
+  bun install
+)
 
-echo "=== Building ==="
-bun run build
+echo "=== Building (plugin worktree) ==="
+(
+  cd "$PLUGIN_DIR"
+  bun run build
+)
 
 # =============================================================================
-# Commit (optional, skip if no git user configured)
+# Commit so the plugin worktree remains clean (prevents future checkout issues)
 # =============================================================================
-if git config user.email &>/dev/null; then
-    echo "=== Committing changes ==="
-    git add -A
-    git commit -m "feat: apply custom patch on $LATEST_TAG" || true
-else
-    echo "=== Skipping commit (no git user configured) ==="
-fi
+(
+  cd "$PLUGIN_DIR"
+  git add -A
+  # Always commit with a local identity (no need to configure global git user)
+  git -c user.name="omo-custom" -c user.email="omo-custom@local" \
+    commit -m "feat: apply local patch on ${LATEST_TAG}" >/dev/null 2>&1 || true
+)
 
 # =============================================================================
 # Done
 # =============================================================================
-VERSION="${LATEST_TAG#v}"
-echo ""
+echo
 echo "=========================================="
-echo "  Build complete: v$VERSION (with max_depth patch)"
+echo "  Build complete: v$VERSION (patched)"
 echo "=========================================="
-echo ""
-echo "Add to ~/.config/opencode/opencode.json:"
-echo ""
-echo "  {"
-echo "    \"plugin\": [\"$REPO_DIR\"]"
-echo "  }"
-echo ""
+echo
+
+echo "OpenCode plugin path (recommended):"
+echo "  file://$PLUGIN_DIR"
+echo
+
+echo "If you previously used file://$REPO_DIR, update your OpenCode config to use /plugin."

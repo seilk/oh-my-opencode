@@ -1,4 +1,15 @@
+# Wrapper repo ignores (this repo is just patches + scripts)
+
+# Build/worktree output
+plugin/
+
+# Common build artifacts
 node_modules/
 dist/
 packages/
+
+# Logs
 *.log
+
+# macOS
+.DS_Store

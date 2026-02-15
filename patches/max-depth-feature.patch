@@ -1,60 +1,60 @@
-diff --git a/src/config/schema.ts b/src/config/schema.ts
-index 34ec376b..717c9de4 100644
---- a/src/config/schema.ts
-+++ b/src/config/schema.ts
-@@ -328,6 +328,8 @@ export const BackgroundTaskConfigSchema = z.object({
+diff --git a/src/config/schema/background-task.ts b/src/config/schema/background-task.ts
+index 233fe286..f47847a2 100644
+--- a/src/config/schema/background-task.ts
++++ b/src/config/schema/background-task.ts
+@@ -6,6 +6,8 @@ export const BackgroundTaskConfigSchema = z.object({
    modelConcurrency: z.record(z.string(), z.number().min(0)).optional(),
    /** Stale timeout in milliseconds - interrupt tasks with no activity for this duration (default: 180000 = 3 minutes, minimum: 60000 = 1 minute) */
    staleTimeoutMs: z.number().min(60000).optional(),
 +  /** Maximum recursion depth for background tasks (default: 2) */
 +  max_depth: z.number().min(0).optional(),
+   /** Timeout for tasks that never received any progress update, falling back to startedAt (default: 600000 = 10 minutes, minimum: 60000 = 1 minute) */
+   messageStalenessTimeoutMs: z.number().min(60000).optional(),
  })
- 
- export const NotificationConfigSchema = z.object({
 diff --git a/src/features/background-agent/manager.ts b/src/features/background-agent/manager.ts
-index e631f30a..2944db72 100644
+index 86ab03d3..bf148c51 100644
 --- a/src/features/background-agent/manager.ts
 +++ b/src/features/background-agent/manager.ts
-@@ -124,6 +124,10 @@ export class BackgroundManager {
+@@ -129,6 +129,10 @@ export class BackgroundManager {
        throw new Error("Agent parameter is required")
      }
  
 +    // Calculate depth from parent task
-+    const parentTask = this.findBySession(input.parentSessionID)
-+    const currentDepth = (parentTask?.depth ?? 0) + 1
++    const parentTask = input.parentSessionID ? this.findBySession(input.parentSessionID) : undefined
++    const currentDepth = input.parentSessionID ? (parentTask?.depth ?? 0) + 1 : 0
 +
      // Create task immediately with status="pending"
      const task: BackgroundTask = {
        id: `bg_${crypto.randomUUID().slice(0, 8)}`,
-@@ -140,6 +144,7 @@ export class BackgroundManager {
-       parentAgent: input.parentAgent,
+@@ -146,6 +150,7 @@ export class BackgroundManager {
+       parentTools: input.parentTools,
        model: input.model,
        category: input.category,
 +      depth: currentDepth,
      }
  
      this.tasks.set(task.id, task)
-@@ -329,7 +334,7 @@ export class BackgroundManager {
-         tools: {
-           ...getAgentToolRestrictions(input.agent),
-           task: false,
--          call_omo_agent: true,
-+          call_omo_agent: (task.depth ?? 1) < (this.config?.max_depth ?? 2),
-           question: false,
-         },
-         parts: [{ type: "text", text: input.prompt }],
-@@ -461,6 +466,10 @@ export class BackgroundManager {
+@@ -335,7 +340,7 @@ export class BackgroundManager {
+           const tools = {
+             ...getAgentToolRestrictions(input.agent),
+             task: false,
+-            call_omo_agent: true,
++            call_omo_agent: (task.depth ?? 0) < (this.config?.max_depth ?? 2),
+             question: false,
+           }
+           setSessionTools(sessionID, tools)
+@@ -470,6 +475,10 @@ export class BackgroundManager {
  
      const concurrencyGroup = input.concurrencyKey ?? input.agent ?? "task"
  
 +    // Calculate depth for external task
-+    const parentTask = this.findBySession(input.parentSessionID)
-+    const currentDepth = (parentTask?.depth ?? 0) + 1
++    const parentTask = input.parentSessionID ? this.findBySession(input.parentSessionID) : undefined
++    const currentDepth = input.parentSessionID ? (parentTask?.depth ?? 0) + 1 : 0
 +
      // Acquire concurrency slot if a key is provided
      if (input.concurrencyKey) {
        await this.concurrencyManager.acquire(input.concurrencyKey)
-@@ -483,6 +492,7 @@ export class BackgroundManager {
+@@ -492,6 +501,7 @@ export class BackgroundManager {
        parentAgent: input.parentAgent,
        concurrencyKey: input.concurrencyKey,
        concurrencyGroup,
@@ -62,23 +62,36 @@ index e631f30a..2944db72 100644
      }
  
      this.tasks.set(task.id, task)
-@@ -588,7 +598,7 @@ export class BackgroundManager {
-         tools: {
-           ...getAgentToolRestrictions(existingTask.agent),
-           task: false,
--          call_omo_agent: true,
-+          call_omo_agent: (existingTask.depth ?? 1) < (this.config?.max_depth ?? 2),
-           question: false,
-         },
-         parts: [{ type: "text", text: input.prompt }],
+@@ -539,6 +549,11 @@ export class BackgroundManager {
+     existingTask.completedAt = undefined
+     existingTask.error = undefined
+     existingTask.parentSessionID = input.parentSessionID
++
++    // Update depth from the new parent session (best-effort)
++    const parentTask = input.parentSessionID ? this.findBySession(input.parentSessionID) : undefined
++    existingTask.depth = input.parentSessionID ? (parentTask?.depth ?? 0) + 1 : 0
++
+     existingTask.parentMessageID = input.parentMessageID
+     existingTask.parentModel = input.parentModel
+     existingTask.parentAgent = input.parentAgent
+@@ -602,7 +617,7 @@ export class BackgroundManager {
+           const tools = {
+             ...getAgentToolRestrictions(existingTask.agent),
+             task: false,
+-            call_omo_agent: true,
++            call_omo_agent: (existingTask.depth ?? 0) < (this.config?.max_depth ?? 2),
+             question: false,
+           }
+           setSessionTools(existingTask.sessionID!, tools)
 diff --git a/src/features/background-agent/types.ts b/src/features/background-agent/types.ts
-index 553f5bb5..6bd298df 100644
+index ea56186e..728623a3 100644
 --- a/src/features/background-agent/types.ts
 +++ b/src/features/background-agent/types.ts
-@@ -45,6 +45,8 @@ export interface BackgroundTask {
+@@ -48,6 +48,9 @@ export interface BackgroundTask {
    lastMsgCount?: number
    /** Number of consecutive polls with stable message count */
    stablePolls?: number
++
 +  /** Recursion depth of the task (0 for root tasks) */
 +  depth?: number
  }
