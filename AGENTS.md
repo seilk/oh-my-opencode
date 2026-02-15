@@ -60,15 +60,16 @@ Purpose:
 
 ---
 
-## Patch Failure Behavior (important)
+## Update Failure Behavior (important)
 
-If upstream changes and the patch cannot be applied:
+If upstream changes and the update fails (patch apply or build):
 - The script **stops immediately** (non-zero exit).
 - The wrapper repo (`~/omo-custom`, `main`) stays clean.
-- The *inactive slot* worktree is left in the conflicted state for inspection.
+- The update work happens only in the *inactive slot*.
 - The active plugin (the `plugin` symlink target) is **not touched**, so the previously-working plugin keeps working.
-- A **repair log** is written to:
-  - `~/omo-custom/logs/patch-failure_<tag>_<timestamp>.md`
+
+If the failure is during patch apply, a **repair log** is written to:
+- `~/omo-custom/logs/patch-failure_<tag>_<timestamp>.md`
 
 The log contains:
 - which stage failed (`apply` vs `apply --3way`)
