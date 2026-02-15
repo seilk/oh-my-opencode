@@ -12,7 +12,14 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH_PATH="$REPO_DIR/patches/max-depth-feature.patch"
-PLUGIN_DIR="$REPO_DIR/plugin"
+
+# OpenCode should point to: file://$REPO_DIR/plugin
+# `plugin/` is a symlink that we atomically repoint after a successful update.
+PLUGIN_LINK="$REPO_DIR/plugin"
+SLOT_A="$REPO_DIR/plugin-a"
+SLOT_B="$REPO_DIR/plugin-b"
+WORKTREE_DIR=""  # set later (the slot we build into)
+
 LOG_DIR="$REPO_DIR/logs"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 
@@ -57,7 +64,7 @@ write_patch_failure_report() {
     echo
     echo "- time: $(date)"
     echo "- repo: $REPO_DIR"
-    echo "- worktree: $PLUGIN_DIR"
+    echo "- worktree: $WORKTREE_DIR"
     echo "- upstream tag: $LATEST_TAG"
     echo "- target branch: $BRANCH_NAME"
     echo "- patch: $patch"
@@ -66,13 +73,13 @@ write_patch_failure_report() {
 
     echo "## git status (worktree)"
     echo '```'
-    git -C "$PLUGIN_DIR" status --porcelain=v1 || true
+    git -C "$WORKTREE_DIR" status --porcelain=v1 || true
     echo '```'
     echo
 
     echo "## unmerged/conflicted files"
     echo '```'
-    git -C "$PLUGIN_DIR" diff --name-only --diff-filter=U || true
+    git -C "$WORKTREE_DIR" diff --name-only --diff-filter=U || true
     echo '```'
     echo
 
@@ -88,7 +95,7 @@ write_patch_failure_report() {
 
     echo "## conflict snippets"
     local files
-    files="$(git -C "$PLUGIN_DIR" diff --name-only --diff-filter=U || true)"
+    files="$(git -C "$WORKTREE_DIR" diff --name-only --diff-filter=U || true)"
     if [[ -z "$files" ]]; then
       echo "(no unmerged files reported by git)"
     else
@@ -96,7 +103,7 @@ write_patch_failure_report() {
         echo
         echo "### $f"
         echo '```'
-        print_conflict_snippets "$PLUGIN_DIR/$f" 6
+        print_conflict_snippets "$WORKTREE_DIR/$f" 6
         echo '```'
       done
     fi
@@ -104,13 +111,13 @@ write_patch_failure_report() {
     echo
     echo "## agent next steps (recipe)"
     echo
-    echo "1) Open the worktree: \`cd $PLUGIN_DIR\`"
+    echo "1) Open the worktree: \`cd $WORKTREE_DIR\`"
     echo "2) Resolve conflicts in the files listed above (remove conflict markers)."
     echo "3) Validate build: \`bun install && bun run build\`"
     echo "4) Regenerate the patch from the upstream tag:"
     echo
     echo '```bash'
-    echo "cd $PLUGIN_DIR"
+    echo "cd $WORKTREE_DIR"
     echo "git diff $LATEST_TAG -- src/ > $REPO_DIR/patches/$(basename "$patch")"
     echo '```'
     echo
@@ -120,11 +127,79 @@ write_patch_failure_report() {
   echo
   echo "ERROR: Patch failed ($stage)." >&2
   echo "Wrote failure report: $report" >&2
-  echo "Worktree left as-is for manual resolution: $PLUGIN_DIR" >&2
+  echo "Worktree left as-is for manual resolution: $WORKTREE_DIR" >&2
   echo
 }
 
 cd "$REPO_DIR"
+
+resolve_abs_path() {
+  local p="$1"
+  if [[ -z "$p" ]]; then
+    echo ""
+    return
+  fi
+  if [[ "$p" != /* ]]; then
+    p="$REPO_DIR/$p"
+  fi
+  local d
+  d="$(cd "$(dirname "$p")" >/dev/null 2>&1 && pwd)"
+  echo "$d/$(basename "$p")"
+}
+
+ensure_plugin_symlink_layout() {
+  # Legacy layout: plugin/ is a real worktree directory.
+  if [[ -d "$PLUGIN_LINK" && ! -L "$PLUGIN_LINK" ]]; then
+    echo "=== Migrating legacy layout: plugin/ -> plugin-a/ + symlink ==="
+    git worktree move "$PLUGIN_LINK" "$SLOT_A"
+    ln -sfn "$SLOT_A" "$PLUGIN_LINK"
+  fi
+
+  # If no symlink exists but slot A exists, make plugin/ point to it.
+  if [[ ! -e "$PLUGIN_LINK" && -d "$SLOT_A" ]]; then
+    ln -sfn "$SLOT_A" "$PLUGIN_LINK"
+  fi
+}
+
+get_active_worktree_dir() {
+  if [[ -L "$PLUGIN_LINK" ]]; then
+    resolve_abs_path "$(readlink "$PLUGIN_LINK")"
+    return
+  fi
+  if [[ -d "$SLOT_A" ]]; then
+    echo "$SLOT_A"
+    return
+  fi
+  if [[ -d "$SLOT_B" ]]; then
+    echo "$SLOT_B"
+    return
+  fi
+  echo ""
+}
+
+get_inactive_slot_dir() {
+  local active="$1"
+  if [[ "$active" == "$SLOT_A" ]]; then
+    echo "$SLOT_B"
+  else
+    echo "$SLOT_A"
+  fi
+}
+
+get_active_tag_from_branch() {
+  local dir="$1"
+  if [[ -z "$dir" ]]; then
+    echo ""
+    return
+  fi
+  local b
+  b="$(git -C "$dir" branch --show-current 2>/dev/null || true)"
+  if [[ "$b" == custom-v* ]]; then
+    echo "${b#custom-}"
+    return
+  fi
+  echo ""
+}
 
 # =============================================================================
 # Install bun if not available
@@ -161,24 +236,47 @@ echo "Latest tag: $LATEST_TAG"
 echo "Target branch: $BRANCH_NAME"
 
 # =============================================================================
-# Ensure plugin worktree exists (or refresh it)
+# Safe update strategy:
+# - Keep the currently-working plugin worktree intact (active slot)
+# - Build/update into the inactive slot
+# - Repoint plugin/ symlink only after success
 # =============================================================================
-if [[ ! -d "$PLUGIN_DIR" ]]; then
-  echo "=== Creating plugin worktree: $PLUGIN_DIR ==="
-  git worktree add "$PLUGIN_DIR" -b "$BRANCH_NAME" "$LATEST_TAG"
+ensure_plugin_symlink_layout
+ACTIVE_DIR="$(get_active_worktree_dir)"
+ACTIVE_TAG="$(get_active_tag_from_branch "$ACTIVE_DIR")"
+INACTIVE_DIR="$(get_inactive_slot_dir "$ACTIVE_DIR")"
+
+if [[ -n "$ACTIVE_TAG" && "$ACTIVE_TAG" == "$LATEST_TAG" ]]; then
+  echo "Already up to date: $LATEST_TAG"
+  echo "Active plugin: $PLUGIN_LINK -> $ACTIVE_DIR"
+  exit 0
+fi
+
+WORKTREE_DIR="$INACTIVE_DIR"
+
+# =============================================================================
+# Ensure inactive worktree exists (or refresh it)
+# =============================================================================
+if [[ ! -d "$WORKTREE_DIR" ]]; then
+  echo "=== Creating inactive worktree: $WORKTREE_DIR ==="
+  # If the branch already exists locally, check it out; else create it.
+  if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
+    git worktree add "$WORKTREE_DIR" "$BRANCH_NAME"
+    git -C "$WORKTREE_DIR" reset --hard "$LATEST_TAG"
+  else
+    git worktree add "$WORKTREE_DIR" -b "$BRANCH_NAME" "$LATEST_TAG"
+  fi
 else
-  # Ensure this is a worktree of this repo
-  if ! git -C "$PLUGIN_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-    echo "ERROR: '$PLUGIN_DIR' exists but is not a git worktree." >&2
+  if ! git -C "$WORKTREE_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "ERROR: '$WORKTREE_DIR' exists but is not a git worktree." >&2
     echo "Move it aside and re-run." >&2
     exit 1
   fi
 
-  echo "=== Refreshing plugin worktree ==="
-  # Make sure we can switch branches deterministically
-  git -C "$PLUGIN_DIR" reset --hard
-  git -C "$PLUGIN_DIR" clean -fdx
-  git -C "$PLUGIN_DIR" checkout -B "$BRANCH_NAME" "$LATEST_TAG"
+  echo "=== Refreshing inactive worktree ==="
+  git -C "$WORKTREE_DIR" reset --hard
+  git -C "$WORKTREE_DIR" clean -fdx
+  git -C "$WORKTREE_DIR" checkout -B "$BRANCH_NAME" "$LATEST_TAG"
 fi
 
 # =============================================================================
@@ -186,14 +284,14 @@ fi
 # =============================================================================
 echo "=== Applying patch ==="
 apply_stderr="$(mktemp)"
-if git -C "$PLUGIN_DIR" apply --check "$PATCH_PATH" >/dev/null 2>&1; then
-  if ! git -C "$PLUGIN_DIR" apply "$PATCH_PATH" 2>"$apply_stderr"; then
+if git -C "$WORKTREE_DIR" apply --check "$PATCH_PATH" >/dev/null 2>&1; then
+  if ! git -C "$WORKTREE_DIR" apply "$PATCH_PATH" 2>"$apply_stderr"; then
     write_patch_failure_report "apply" "$PATCH_PATH" "$apply_stderr"
     exit 1
   fi
 else
   echo "Patch did not apply cleanly; trying 3-way..."
-  if ! git -C "$PLUGIN_DIR" apply --3way "$PATCH_PATH" 2>"$apply_stderr"; then
+  if ! git -C "$WORKTREE_DIR" apply --3way "$PATCH_PATH" 2>"$apply_stderr"; then
     write_patch_failure_report "apply --3way" "$PATCH_PATH" "$apply_stderr"
     exit 1
   fi
@@ -205,13 +303,13 @@ rm -f "$apply_stderr"
 # =============================================================================
 echo "=== Installing dependencies (plugin worktree) ==="
 (
-  cd "$PLUGIN_DIR"
+  cd "$WORKTREE_DIR"
   bun install
 )
 
 echo "=== Building (plugin worktree) ==="
 (
-  cd "$PLUGIN_DIR"
+  cd "$WORKTREE_DIR"
   bun run build
 )
 
@@ -219,7 +317,7 @@ echo "=== Building (plugin worktree) ==="
 # Commit so the plugin worktree remains clean (prevents future checkout issues)
 # =============================================================================
 (
-  cd "$PLUGIN_DIR"
+  cd "$WORKTREE_DIR"
   git add -A
   # Always commit with a local identity (no need to configure global git user)
   git -c user.name="omo-custom" -c user.email="omo-custom@local" \
@@ -235,8 +333,11 @@ echo "  Build complete: v$VERSION (patched)"
 echo "=========================================="
 echo
 
+# Switch active plugin only after success
+ln -sfn "$WORKTREE_DIR" "$PLUGIN_LINK"
+
 echo "OpenCode plugin path (recommended):"
-echo "  file://$PLUGIN_DIR"
+echo "  file://$PLUGIN_LINK"
 echo
 
 echo "If you previously used file://$REPO_DIR, update your OpenCode config to use /plugin."

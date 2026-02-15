@@ -6,8 +6,11 @@ This repo is intentionally **thin**.
   - patch files (`patches/*.patch`)
   - one build script (`update-and-build.sh`)
   - docs
-- Upstream oh-my-opencode source code lives in a **separate git worktree** at:
-  - `~/omo-custom/plugin/`
+- Upstream oh-my-opencode source code lives in a **separate git worktree**.
+  - The path `~/omo-custom/plugin` is a **symlink** to the currently-active worktree slot.
+  - Actual worktrees live in:
+    - `~/omo-custom/plugin-a/`
+    - `~/omo-custom/plugin-b/`
 
 Goal: reliably track the latest upstream release, apply the local patch, build the plugin, and keep branch switching clean.
 
@@ -23,12 +26,17 @@ cd ~/omo-custom
 What it does:
 1) Fetches upstream tags.
 2) Picks the latest tag like `v3.5.5`.
-3) Refreshes the worktree (`plugin/`) deterministically:
+3) Uses a **safe two-slot update strategy**:
+   - keep the currently-working plugin slot intact
+   - build the update into the inactive slot
+   - repoint `plugin` symlink only after success
+4) Refreshes the inactive slot deterministically:
    - `reset --hard` + `clean -fdx`
    - `checkout -B custom-<tag> <tag>`
-4) Applies `patches/max-depth-feature.patch`.
-5) Builds the plugin.
-6) Commits the patched result inside the worktree branch so the worktree stays clean.
+5) Applies `patches/max-depth-feature.patch`.
+6) Builds the plugin.
+7) Commits the patched result inside the worktree branch so the slot stays clean.
+8) Switches `~/omo-custom/plugin` symlink to the newly-built slot.
 
 ---
 
@@ -57,7 +65,8 @@ Purpose:
 If upstream changes and the patch cannot be applied:
 - The script **stops immediately** (non-zero exit).
 - The wrapper repo (`~/omo-custom`, `main`) stays clean.
-- The worktree (`~/omo-custom/plugin/`) is left in the conflicted state for inspection.
+- The *inactive slot* worktree is left in the conflicted state for inspection.
+- The active plugin (the `plugin` symlink target) is **not touched**, so the previously-working plugin keeps working.
 - A **repair log** is written to:
   - `~/omo-custom/logs/patch-failure_<tag>_<timestamp>.md`
 

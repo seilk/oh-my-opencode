@@ -1,7 +1,10 @@
 # Wrapper repo ignores (this repo is just patches + scripts)
 
 # Build/worktree output
+plugin
 plugin/
+plugin-a/
+plugin-b/
 
 # Common build artifacts
 node_modules/
