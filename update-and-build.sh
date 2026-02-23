@@ -22,6 +22,7 @@ WORKTREE_DIR=""  # set later (the slot we build into)
 
 LOG_DIR="$REPO_DIR/logs"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
+OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
 
 mkdir -p "$LOG_DIR"
 
@@ -201,6 +202,66 @@ get_active_tag_from_branch() {
   echo ""
 }
 
+sanitize_opencode_local_plugin_install() {
+  local config_dir="$OPENCODE_CONFIG_DIR"
+  local package_json="$config_dir/package.json"
+  local stale_module="$config_dir/node_modules/oh-my-opencode"
+  local stale_bin="$config_dir/node_modules/.bin/oh-my-opencode"
+  local removed_dependency=0
+  local removed_files=0
+
+  if [[ -f "$package_json" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+      local dep_status
+      dep_status="$(python3 - "$package_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+package_path = Path(sys.argv[1])
+
+try:
+    data = json.loads(package_path.read_text(encoding="utf-8"))
+except Exception:
+    print("parse_error")
+    sys.exit(0)
+
+deps = data.get("dependencies")
+if isinstance(deps, dict) and "oh-my-opencode" in deps:
+    deps.pop("oh-my-opencode", None)
+    if not deps:
+        data.pop("dependencies", None)
+    package_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    print("removed")
+else:
+    print("unchanged")
+PY
+)"
+      if [[ "$dep_status" == "removed" ]]; then
+        removed_dependency=1
+      elif [[ "$dep_status" == "parse_error" ]]; then
+        echo "WARN: Could not parse $package_json; left unchanged." >&2
+      fi
+    else
+      echo "WARN: python3 not found; skipped stale dependency cleanup for $package_json." >&2
+    fi
+  fi
+
+  if [[ -e "$stale_module" || -L "$stale_module" ]]; then
+    rm -rf "$stale_module"
+    removed_files=1
+  fi
+
+  if [[ -e "$stale_bin" || -L "$stale_bin" ]]; then
+    rm -f "$stale_bin"
+    removed_files=1
+  fi
+
+  if (( removed_dependency == 1 || removed_files == 1 )); then
+    echo "=== Cleaned stale local oh-my-opencode install under $config_dir ==="
+  fi
+}
+
 # =============================================================================
 # Install bun if not available
 # =============================================================================
@@ -245,6 +306,7 @@ ensure_plugin_symlink_layout
 ACTIVE_DIR="$(get_active_worktree_dir)"
 ACTIVE_TAG="$(get_active_tag_from_branch "$ACTIVE_DIR")"
 INACTIVE_DIR="$(get_inactive_slot_dir "$ACTIVE_DIR")"
+sanitize_opencode_local_plugin_install
 
 if [[ -n "$ACTIVE_TAG" && "$ACTIVE_TAG" == "$LATEST_TAG" ]]; then
   echo "Already up to date: $LATEST_TAG"
@@ -339,5 +401,7 @@ ln -sfn "$WORKTREE_DIR" "$PLUGIN_LINK"
 echo "OpenCode plugin path (recommended):"
 echo "  file://$PLUGIN_LINK"
 echo
+
+sanitize_opencode_local_plugin_install
 
 echo "If you previously used file://$REPO_DIR, update your OpenCode config to use /plugin."

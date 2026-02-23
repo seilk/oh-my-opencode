@@ -19,7 +19,7 @@ The script will:
 Then add to `~/.config/opencode/opencode.json`:
 ```json
 {
-  "plugin": ["~/omo-custom"]
+  "plugin": ["file:///Users/seil/omo-custom/plugin"]
 }
 ```
 
