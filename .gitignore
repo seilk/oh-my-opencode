@@ -1,15 +1,10 @@
-# Wrapper repo ignores (this repo is just patches + scripts)
-
-# Build/worktree output
+# Build slots (shallow clones, disposable)
 plugin
-plugin/
 plugin-a/
 plugin-b/
 
-# Common build artifacts
-node_modules/
-dist/
-packages/
+# State
+state/
 
 # Logs
 logs/

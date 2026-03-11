@@ -1,18 +1,17 @@
-# omo-custom — Wrapper Repo for Upstream oh-my-opencode + Local Patch
+# omo-custom
 
-This repo is intentionally **thin**.
+Thin wrapper repo: local patches on upstream [oh-my-opencode](https://github.com/code-yeongyu/oh-my-opencode).
 
-- `main` stores only:
-  - patch files (`patches/*.patch`)
-  - one build script (`update-and-build.sh`)
-  - docs
-- Upstream oh-my-opencode source code lives in a **separate git worktree**.
-  - The path `~/omo-custom/plugin` is a **symlink** to the currently-active worktree slot.
-  - Actual worktrees live in:
-    - `~/omo-custom/plugin-a/`
-    - `~/omo-custom/plugin-b/`
-
-Goal: reliably track the latest upstream release, apply the local patch, build the plugin, and keep branch switching clean.
+```
+~/omo-custom/
+├── patches/*.patch        # local patches (tracked)
+├── update-and-build.sh    # build script (tracked)
+├── state/current-tag      # active version (gitignored)
+├── plugin → plugin-a/     # symlink to active slot (gitignored)
+├── plugin-a/              # shallow clone + build (gitignored)
+├── plugin-b/              # shallow clone + build (gitignored)
+└── logs/                  # failure reports (gitignored)
+```
 
 ---
 
@@ -20,98 +19,94 @@ Goal: reliably track the latest upstream release, apply the local patch, build t
 
 ```bash
 cd ~/omo-custom
-./update-and-build.sh
+./update-and-build.sh              # update to latest upstream tag
+./update-and-build.sh --reset      # nuke all local state, rebuild from scratch
+./update-and-build.sh --tag v3.10.0  # build a specific version
 ```
 
-What it does:
-1) Fetches upstream tags.
-2) Picks the latest tag like `v3.5.5`.
-3) Uses a **safe two-slot update strategy**:
-   - keep the currently-working plugin slot intact
-   - build the update into the inactive slot
-   - repoint `plugin` symlink only after success
-4) Refreshes the inactive slot deterministically:
-   - `reset --hard` + `clean -fdx`
-   - `checkout -B custom-<tag> <tag>`
-5) Applies `patches/max-depth-feature.patch`.
-6) Builds the plugin.
-7) Commits the patched result inside the worktree branch so the slot stays clean.
-8) Switches `~/omo-custom/plugin` symlink to the newly-built slot.
+On a fresh machine:
+```bash
+git clone <this-repo> ~/omo-custom
+cd ~/omo-custom
+./update-and-build.sh
+# If bun is missing, the script installs it automatically.
+# Then configure OpenCode: plugin = file:///Users/<you>/omo-custom/plugin
+```
+
+---
+
+## How It Works
+
+1. Queries latest upstream tag via `git ls-remote` (no local upstream remote needed).
+2. Shallow-clones the target tag into the inactive slot.
+3. Injects the correct version (from the tag) into `package.json` before building.
+4. Applies all `patches/*.patch` in sorted order via `git apply`.
+5. Runs `bun install && bun run build`.
+6. On success: atomic symlink swap (`ln -sfn`) to activate the new build.
+7. On failure: inactive slot left for inspection, active plugin untouched.
+
+Each slot is a fully independent shallow clone. No shared git state, no branch management.
 
 ---
 
 ## Plugin Path
 
-OpenCode should load the plugin from the worktree directory:
+OpenCode loads the plugin from:
 - `file:///Users/seil/omo-custom/plugin`
 
-(Do not point OpenCode at `~/omo-custom` root.)
+Do not point at `~/omo-custom` root.
 
 ---
 
-## Local Patch
+## Local Patches
 
-Current patch: `patches/max-depth-feature.patch`
+Current: `patches/001-max-depth-feature.patch`
 
-Purpose:
-- adds `background_task.max_depth` config
-- tracks `depth` per background task
-- disables `call_omo_agent` when depth exceeds `max_depth` (default 2)
+Adds `background_task.max_depth` config to limit background task recursion depth.
 
----
-
-## Update Failure Behavior (important)
-
-If upstream changes and the update fails (patch apply or build):
-- The script **stops immediately** (non-zero exit).
-- The wrapper repo (`~/omo-custom`, `main`) stays clean.
-- The update work happens only in the *inactive slot*.
-- The active plugin (the `plugin` symlink target) is **not touched**, so the previously-working plugin keeps working.
-
-If the failure is during patch apply, a **repair log** is written to:
-- `~/omo-custom/logs/patch-failure_<tag>_<timestamp>.md`
-
-The log contains:
-- which stage failed (`apply` vs `apply --3way`)
-- `git status --porcelain`
-- unmerged/conflicted files list
-- conflict marker snippets
-- a short “agent next steps” recipe
+Patches are applied in alphabetical order. Prefix with `NNN-` for deterministic ordering.
 
 ---
 
-## Agent Repair Recipe (update patch for a new upstream tag)
+## Failure Behavior
 
-1) Open the worktree:
+If a patch fails to apply:
+- Script stops immediately.
+- Active plugin (symlink target) is untouched.
+- A failure report is written to `logs/patch-failure_<tag>_<timestamp>.md`.
+- The build slot is left as-is for manual inspection.
+
+---
+
+## Agent Repair Recipe
+
+1. Inspect the failed build slot:
 ```bash
-cd ~/omo-custom/plugin
+cd ~/omo-custom/plugin-a  # or plugin-b, whichever failed
 git status
 ```
 
-2) Resolve conflicts and remove conflict markers.
-
-3) Validate build:
+2. Fix the patch conflicts, then validate:
 ```bash
-bun install
-bun run build
+bun install && bun run build
 ```
 
-4) Regenerate the patch against the upstream tag:
+3. Regenerate the patch:
 ```bash
-cd ~/omo-custom/plugin
-git diff <tag> -- src/ > ~/omo-custom/patches/max-depth-feature.patch
+git diff HEAD -- src/ > ~/omo-custom/patches/001-max-depth-feature.patch
 ```
 
-5) Re-run:
+4. Re-run:
 ```bash
 cd ~/omo-custom
-./update-and-build.sh
+./update-and-build.sh --reset
 ```
 
 ---
 
 ## Repo Rules
 
-- Do not vendor upstream source into wrapper `main`.
-- All local changes must be expressed as `patches/*.patch`.
-- Logs go under `logs/` (ignored by git).
+- Wrapper `main` contains only patches, script, and docs.
+- All local modifications are expressed as `patches/*.patch`.
+- Build slots (`plugin-a/`, `plugin-b/`) are disposable shallow clones.
+- Never vendor upstream source into this repo.

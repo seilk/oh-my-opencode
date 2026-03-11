@@ -3,85 +3,91 @@ set -euo pipefail
 
 # update-and-build.sh
 #
-# This repo is a thin wrapper that stores local patches, and builds an upstream
-# oh-my-opencode checkout in a *separate git worktree*.
+# Thin wrapper: shallow-clone upstream oh-my-opencode by tag, apply local
+# patches, inject the correct version, build, and activate via symlink swap.
 #
-# Why:
-# - Avoids dirty working tree / branch checkout failures on this wrapper repo
-# - Keeps a stable plugin directory for OpenCode
+# Usage:
+#   ./update-and-build.sh              # update to latest upstream tag
+#   ./update-and-build.sh --reset      # nuke all local state, rebuild fresh
+#   ./update-and-build.sh --tag v3.10.0  # build a specific version
+#   ./update-and-build.sh --help
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PATCH_PATH="$REPO_DIR/patches/max-depth-feature.patch"
+UPSTREAM_URL="https://github.com/code-yeongyu/oh-my-opencode.git"
+PATCH_DIR="$REPO_DIR/patches"
+LOG_DIR="$REPO_DIR/logs"
+STATE_DIR="$REPO_DIR/state"
+RUN_ID="$(date +%Y%m%d-%H%M%S)"
 
-# OpenCode should point to: file://$REPO_DIR/plugin
-# `plugin/` is a symlink that we atomically repoint after a successful update.
 PLUGIN_LINK="$REPO_DIR/plugin"
 SLOT_A="$REPO_DIR/plugin-a"
 SLOT_B="$REPO_DIR/plugin-b"
-WORKTREE_DIR=""  # set later (the slot we build into)
 
-LOG_DIR="$REPO_DIR/logs"
-RUN_ID="$(date +%Y%m%d-%H%M%S)"
-OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
+# Parsed from CLI args
+FLAG_RESET=0
+FLAG_TAG=""
 
-mkdir -p "$LOG_DIR"
+# =============================================================================
+# CLI argument parsing
+# =============================================================================
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
 
-print_conflict_snippets() {
-  local file="$1"
-  local context="${2:-5}"
+Update oh-my-opencode plugin from upstream, apply local patches, and build.
 
-  if [[ ! -f "$file" ]]; then
-    echo "(missing file: $file)"
-    return
-  fi
+Options:
+  --reset       Remove all local build state and rebuild from scratch
+  --tag TAG     Build a specific upstream tag (e.g. v3.10.0) instead of latest
+  --help        Show this help message
 
-  local marker_lines
-  marker_lines="$(grep -n -E '^(<<<<<<<|=======|>>>>>>>)' "$file" 2>/dev/null | cut -d: -f1 | tr '\n' ' ' || true)"
-  if [[ -z "$marker_lines" ]]; then
-    echo "(no conflict markers found)"
-    return
-  fi
-
-  for ln in $marker_lines; do
-    local start=$((ln - context))
-    local end=$((ln + context))
-    if (( start < 1 )); then start=1; fi
-
-    echo
-    echo "---- lines ${start}-${end} (around ${ln}) ----"
-    sed -n "${start},${end}p" "$file" | nl -ba -w4 -s': ' -v "$start"
-  done
+Examples:
+  $(basename "$0")                # update to latest
+  $(basename "$0") --reset        # clean slate rebuild
+  $(basename "$0") --tag v3.10.0  # pin to specific version
+EOF
+  exit 0
 }
 
-write_patch_failure_report() {
-  local stage="$1"        # e.g., "apply" or "apply --3way"
-  local patch="$2"        # patch path
-  local stderr_file="$3"  # captured stderr
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reset)  FLAG_RESET=1; shift ;;
+    --tag)
+      if [[ -z "${2:-}" ]]; then
+        echo "ERROR: --tag requires a value (e.g. --tag v3.10.0)" >&2
+        exit 1
+      fi
+      FLAG_TAG="$2"; shift 2 ;;
+    --help|-h) usage ;;
+    *)
+      echo "ERROR: Unknown option: $1" >&2
+      echo "Run with --help for usage." >&2
+      exit 1 ;;
+  esac
+done
 
-  local report="$LOG_DIR/patch-failure_${LATEST_TAG}_${RUN_ID}.md"
+# =============================================================================
+# Helpers
+# =============================================================================
+mkdir -p "$LOG_DIR" "$STATE_DIR"
+
+write_patch_failure_report() {
+  local stage="$1"
+  local patch="$2"
+  local stderr_file="$3"
+  local build_dir="$4"
+
+  local report="$LOG_DIR/patch-failure_${TARGET_TAG}_${RUN_ID}.md"
 
   {
     echo "# Patch failure report (oh-my-opencode)"
     echo
     echo "- time: $(date)"
     echo "- repo: $REPO_DIR"
-    echo "- worktree: $WORKTREE_DIR"
-    echo "- upstream tag: $LATEST_TAG"
-    echo "- target branch: $BRANCH_NAME"
+    echo "- build dir: $build_dir"
+    echo "- upstream tag: $TARGET_TAG"
     echo "- patch: $patch"
     echo "- stage: $stage"
-    echo
-
-    echo "## git status (worktree)"
-    echo '```'
-    git -C "$WORKTREE_DIR" status --porcelain=v1 || true
-    echo '```'
-    echo
-
-    echo "## unmerged/conflicted files"
-    echo '```'
-    git -C "$WORKTREE_DIR" diff --name-only --diff-filter=U || true
-    echo '```'
     echo
 
     echo "## apply stderr"
@@ -94,91 +100,46 @@ write_patch_failure_report() {
     echo '```'
     echo
 
-    echo "## conflict snippets"
-    local files
-    files="$(git -C "$WORKTREE_DIR" diff --name-only --diff-filter=U || true)"
-    if [[ -z "$files" ]]; then
-      echo "(no unmerged files reported by git)"
-    else
-      for f in $files; do
-        echo
-        echo "### $f"
-        echo '```'
-        print_conflict_snippets "$WORKTREE_DIR/$f" 6
-        echo '```'
-      done
-    fi
-
-    echo
-    echo "## agent next steps (recipe)"
-    echo
-    echo "1) Open the worktree: \`cd $WORKTREE_DIR\`"
-    echo "2) Resolve conflicts in the files listed above (remove conflict markers)."
-    echo "3) Validate build: \`bun install && bun run build\`"
-    echo "4) Regenerate the patch from the upstream tag:"
-    echo
-    echo '```bash'
-    echo "cd $WORKTREE_DIR"
-    echo "git diff $LATEST_TAG -- src/ > $REPO_DIR/patches/$(basename "$patch")"
+    echo "## git status"
+    echo '```'
+    git -C "$build_dir" status --porcelain=v1 2>/dev/null || true
     echo '```'
     echo
-    echo "5) Re-run: \`cd $REPO_DIR && ./update-and-build.sh\`"
+
+    echo "## agent next steps"
+    echo
+    echo "1) Inspect the build dir: \`cd $build_dir\`"
+    echo "2) Resolve conflicts, then validate: \`bun install && bun run build\`"
+    echo "3) Regenerate the patch:"
+    echo '```bash'
+    echo "cd $build_dir"
+    echo "git diff HEAD -- src/ > $REPO_DIR/patches/$(basename "$patch")"
+    echo '```'
+    echo "4) Re-run: \`cd $REPO_DIR && ./update-and-build.sh\`"
   } > "$report"
 
   echo
-  echo "ERROR: Patch failed ($stage)." >&2
-  echo "Wrote failure report: $report" >&2
-  echo "Worktree left as-is for manual resolution: $WORKTREE_DIR" >&2
+  echo "ERROR: Patch failed ($stage): $(basename "$patch")" >&2
+  echo "Report: $report" >&2
+  echo "Build dir left for inspection: $build_dir" >&2
   echo
 }
 
-cd "$REPO_DIR"
-
-resolve_abs_path() {
-  local p="$1"
-  if [[ -z "$p" ]]; then
-    echo ""
-    return
-  fi
-  if [[ "$p" != /* ]]; then
-    p="$REPO_DIR/$p"
-  fi
-  local d
-  d="$(cd "$(dirname "$p")" >/dev/null 2>&1 && pwd)"
-  echo "$d/$(basename "$p")"
-}
-
-ensure_plugin_symlink_layout() {
-  # Legacy layout: plugin/ is a real worktree directory.
-  if [[ -d "$PLUGIN_LINK" && ! -L "$PLUGIN_LINK" ]]; then
-    echo "=== Migrating legacy layout: plugin/ -> plugin-a/ + symlink ==="
-    git worktree move "$PLUGIN_LINK" "$SLOT_A"
-    ln -sfn "$SLOT_A" "$PLUGIN_LINK"
-  fi
-
-  # If no symlink exists but slot A exists, make plugin/ point to it.
-  if [[ ! -e "$PLUGIN_LINK" && -d "$SLOT_A" ]]; then
-    ln -sfn "$SLOT_A" "$PLUGIN_LINK"
-  fi
-}
-
-get_active_worktree_dir() {
+get_active_slot() {
   if [[ -L "$PLUGIN_LINK" ]]; then
-    resolve_abs_path "$(readlink "$PLUGIN_LINK")"
-    return
-  fi
-  if [[ -d "$SLOT_A" ]]; then
-    echo "$SLOT_A"
-    return
-  fi
-  if [[ -d "$SLOT_B" ]]; then
-    echo "$SLOT_B"
+    local target
+    target="$(readlink "$PLUGIN_LINK")"
+    # Resolve relative symlinks
+    if [[ "$target" != /* ]]; then
+      target="$REPO_DIR/$target"
+    fi
+    echo "$target"
     return
   fi
   echo ""
 }
 
-get_inactive_slot_dir() {
+get_inactive_slot() {
   local active="$1"
   if [[ "$active" == "$SLOT_A" ]]; then
     echo "$SLOT_B"
@@ -187,79 +148,25 @@ get_inactive_slot_dir() {
   fi
 }
 
-get_active_tag_from_branch() {
-  local dir="$1"
-  if [[ -z "$dir" ]]; then
-    echo ""
-    return
-  fi
-  local b
-  b="$(git -C "$dir" branch --show-current 2>/dev/null || true)"
-  if [[ "$b" == custom-v* ]]; then
-    echo "${b#custom-}"
+get_active_tag() {
+  if [[ -f "$STATE_DIR/current-tag" ]]; then
+    cat "$STATE_DIR/current-tag"
     return
   fi
   echo ""
 }
 
-sanitize_opencode_local_plugin_install() {
-  local config_dir="$OPENCODE_CONFIG_DIR"
-  local package_json="$config_dir/package.json"
-  local stale_module="$config_dir/node_modules/oh-my-opencode"
-  local stale_bin="$config_dir/node_modules/.bin/oh-my-opencode"
-  local removed_dependency=0
-  local removed_files=0
+inject_version() {
+  local dir="$1"
+  local version="$2"
 
-  if [[ -f "$package_json" ]]; then
-    if command -v python3 >/dev/null 2>&1; then
-      local dep_status
-      dep_status="$(python3 - "$package_json" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-package_path = Path(sys.argv[1])
-
-try:
-    data = json.loads(package_path.read_text(encoding="utf-8"))
-except Exception:
-    print("parse_error")
-    sys.exit(0)
-
-deps = data.get("dependencies")
-if isinstance(deps, dict) and "oh-my-opencode" in deps:
-    deps.pop("oh-my-opencode", None)
-    if not deps:
-        data.pop("dependencies", None)
-    package_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    print("removed")
-else:
-    print("unchanged")
-PY
-)"
-      if [[ "$dep_status" == "removed" ]]; then
-        removed_dependency=1
-      elif [[ "$dep_status" == "parse_error" ]]; then
-        echo "WARN: Could not parse $package_json; left unchanged." >&2
-      fi
-    else
-      echo "WARN: python3 not found; skipped stale dependency cleanup for $package_json." >&2
-    fi
-  fi
-
-  if [[ -e "$stale_module" || -L "$stale_module" ]]; then
-    rm -rf "$stale_module"
-    removed_files=1
-  fi
-
-  if [[ -e "$stale_bin" || -L "$stale_bin" ]]; then
-    rm -f "$stale_bin"
-    removed_files=1
-  fi
-
-  if (( removed_dependency == 1 || removed_files == 1 )); then
-    echo "=== Cleaned stale local oh-my-opencode install under $config_dir ==="
-  fi
+  INJECT_DIR="$dir" INJECT_VERSION="$version" bun -e "
+    const dir = process.env.INJECT_DIR
+    const version = process.env.INJECT_VERSION
+    const pkg = await Bun.file(dir + '/package.json').json()
+    pkg.version = version
+    await Bun.write(dir + '/package.json', JSON.stringify(pkg, null, 2) + '\n')
+  "
 }
 
 # =============================================================================
@@ -274,134 +181,119 @@ if ! command -v bun >/dev/null 2>&1; then
 fi
 
 # =============================================================================
-# Setup upstream remote
+# Handle --reset
 # =============================================================================
-if ! git remote get-url upstream >/dev/null 2>&1; then
-  echo "=== Adding upstream remote ==="
-  git remote add upstream https://github.com/code-yeongyu/oh-my-opencode.git
+if (( FLAG_RESET == 1 )); then
+  echo "=== Resetting all local build state ==="
+  rm -rf "$SLOT_A" "$SLOT_B"
+  rm -f "$PLUGIN_LINK"
+  rm -f "$STATE_DIR/current-tag"
+  echo "Cleared: plugin-a, plugin-b, plugin symlink, state"
 fi
 
-echo "=== Fetching latest from upstream ==="
-git fetch upstream --tags
+# =============================================================================
+# Resolve target tag
+# =============================================================================
+if [[ -n "$FLAG_TAG" ]]; then
+  TARGET_TAG="$FLAG_TAG"
+  echo "Target tag (pinned): $TARGET_TAG"
+else
+  echo "=== Querying latest upstream tag ==="
+  TARGET_TAG="$(git ls-remote --tags --sort=-v:refname "$UPSTREAM_URL" 'v[0-9]*' \
+    | grep -v '\^{}$' \
+    | head -1 \
+    | sed 's|.*refs/tags/||')"
 
-LATEST_TAG="$(git tag -l 'v*' --sort=-v:refname | head -1)"
-if [[ -z "$LATEST_TAG" ]]; then
-  echo "ERROR: No tags found. Make sure upstream is accessible." >&2
-  exit 1
+  if [[ -z "$TARGET_TAG" ]]; then
+    echo "ERROR: No tags found at $UPSTREAM_URL" >&2
+    exit 1
+  fi
+  echo "Latest tag: $TARGET_TAG"
 fi
 
-BRANCH_NAME="custom-${LATEST_TAG}"
-VERSION="${LATEST_TAG#v}"
-
-echo "Latest tag: $LATEST_TAG"
-echo "Target branch: $BRANCH_NAME"
+VERSION="${TARGET_TAG#v}"
 
 # =============================================================================
-# Safe update strategy:
-# - Keep the currently-working plugin worktree intact (active slot)
-# - Build/update into the inactive slot
-# - Repoint plugin/ symlink only after success
+# Skip if already up to date (unless --reset was used)
 # =============================================================================
-ensure_plugin_symlink_layout
-ACTIVE_DIR="$(get_active_worktree_dir)"
-ACTIVE_TAG="$(get_active_tag_from_branch "$ACTIVE_DIR")"
-INACTIVE_DIR="$(get_inactive_slot_dir "$ACTIVE_DIR")"
-sanitize_opencode_local_plugin_install
+ACTIVE_SLOT="$(get_active_slot)"
+ACTIVE_TAG="$(get_active_tag)"
 
-if [[ -n "$ACTIVE_TAG" && "$ACTIVE_TAG" == "$LATEST_TAG" ]]; then
-  echo "Already up to date: $LATEST_TAG"
-  echo "Active plugin: $PLUGIN_LINK -> $ACTIVE_DIR"
+if (( FLAG_RESET == 0 )) && [[ -n "$ACTIVE_TAG" && "$ACTIVE_TAG" == "$TARGET_TAG" && -d "$ACTIVE_SLOT" ]]; then
+  echo "Already up to date: $TARGET_TAG"
+  echo "Active plugin: $PLUGIN_LINK -> $ACTIVE_SLOT"
   exit 0
 fi
 
-WORKTREE_DIR="$INACTIVE_DIR"
+# =============================================================================
+# Determine build slot (inactive slot, or slot-a if both empty)
+# =============================================================================
+if [[ -n "$ACTIVE_SLOT" && -d "$ACTIVE_SLOT" ]]; then
+  BUILD_DIR="$(get_inactive_slot "$ACTIVE_SLOT")"
+else
+  BUILD_DIR="$SLOT_A"
+fi
+
+echo "Build slot: $BUILD_DIR"
 
 # =============================================================================
-# Ensure inactive worktree exists (or refresh it)
+# Shallow clone upstream into build slot
 # =============================================================================
-if [[ ! -d "$WORKTREE_DIR" ]]; then
-  echo "=== Creating inactive worktree: $WORKTREE_DIR ==="
-  # If the branch already exists locally, check it out; else create it.
-  if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
-    git worktree add "$WORKTREE_DIR" "$BRANCH_NAME"
-    git -C "$WORKTREE_DIR" reset --hard "$LATEST_TAG"
+rm -rf "$BUILD_DIR"
+
+echo "=== Cloning $TARGET_TAG (shallow) ==="
+git clone --depth 1 --branch "$TARGET_TAG" "$UPSTREAM_URL" "$BUILD_DIR" 2>&1
+
+# =============================================================================
+# Inject version from tag into package.json
+# =============================================================================
+echo "=== Injecting version: $VERSION ==="
+inject_version "$BUILD_DIR" "$VERSION"
+
+# =============================================================================
+# Apply patches (sorted glob)
+# =============================================================================
+if [[ -d "$PATCH_DIR" ]]; then
+  shopt -s nullglob
+  PATCHES=("$PATCH_DIR"/*.patch)
+  shopt -u nullglob
+
+  if (( ${#PATCHES[@]} > 0 )); then
+    echo "=== Applying patches (${#PATCHES[@]}) ==="
+    for p in "${PATCHES[@]}"; do
+      echo "- $(basename "$p")"
+      apply_stderr="$(mktemp)"
+      if ! git -C "$BUILD_DIR" apply "$p" 2>"$apply_stderr"; then
+        write_patch_failure_report "apply" "$p" "$apply_stderr" "$BUILD_DIR"
+        rm -f "$apply_stderr"
+        exit 1
+      fi
+      rm -f "$apply_stderr"
+    done
   else
-    git worktree add "$WORKTREE_DIR" -b "$BRANCH_NAME" "$LATEST_TAG"
-  fi
-else
-  if ! git -C "$WORKTREE_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-    echo "ERROR: '$WORKTREE_DIR' exists but is not a git worktree." >&2
-    echo "Move it aside and re-run." >&2
-    exit 1
-  fi
-
-  echo "=== Refreshing inactive worktree ==="
-  git -C "$WORKTREE_DIR" reset --hard
-  git -C "$WORKTREE_DIR" clean -fdx
-  git -C "$WORKTREE_DIR" checkout -B "$BRANCH_NAME" "$LATEST_TAG"
-fi
-
-# =============================================================================
-# Apply patch in plugin worktree
-# =============================================================================
-echo "=== Applying patch ==="
-apply_stderr="$(mktemp)"
-if git -C "$WORKTREE_DIR" apply --check "$PATCH_PATH" >/dev/null 2>&1; then
-  if ! git -C "$WORKTREE_DIR" apply "$PATCH_PATH" 2>"$apply_stderr"; then
-    write_patch_failure_report "apply" "$PATCH_PATH" "$apply_stderr"
-    exit 1
-  fi
-else
-  echo "Patch did not apply cleanly; trying 3-way..."
-  if ! git -C "$WORKTREE_DIR" apply --3way "$PATCH_PATH" 2>"$apply_stderr"; then
-    write_patch_failure_report "apply --3way" "$PATCH_PATH" "$apply_stderr"
-    exit 1
+    echo "=== No patches found (skipping) ==="
   fi
 fi
-rm -f "$apply_stderr"
 
 # =============================================================================
-# Build in plugin worktree
+# Build
 # =============================================================================
-echo "=== Installing dependencies (plugin worktree) ==="
-(
-  cd "$WORKTREE_DIR"
-  bun install
-)
+echo "=== Installing dependencies ==="
+(cd "$BUILD_DIR" && bun install)
 
-echo "=== Building (plugin worktree) ==="
-(
-  cd "$WORKTREE_DIR"
-  bun run build
-)
+echo "=== Building ==="
+(cd "$BUILD_DIR" && bun run build)
 
 # =============================================================================
-# Commit so the plugin worktree remains clean (prevents future checkout issues)
+# Activate: atomic symlink swap
 # =============================================================================
-(
-  cd "$WORKTREE_DIR"
-  git add -A
-  # Always commit with a local identity (no need to configure global git user)
-  git -c user.name="omo-custom" -c user.email="omo-custom@local" \
-    commit -m "feat: apply local patch on ${LATEST_TAG}" >/dev/null 2>&1 || true
-)
+ln -sfn "$BUILD_DIR" "$PLUGIN_LINK"
+echo "$TARGET_TAG" > "$STATE_DIR/current-tag"
 
-# =============================================================================
-# Done
-# =============================================================================
 echo
 echo "=========================================="
 echo "  Build complete: v$VERSION (patched)"
 echo "=========================================="
 echo
-
-# Switch active plugin only after success
-ln -sfn "$WORKTREE_DIR" "$PLUGIN_LINK"
-
-echo "OpenCode plugin path (recommended):"
-echo "  file://$PLUGIN_LINK"
-echo
-
-sanitize_opencode_local_plugin_install
-
-echo "If you previously used file://$REPO_DIR, update your OpenCode config to use /plugin."
+echo "Active plugin: $PLUGIN_LINK -> $BUILD_DIR"
+echo "OpenCode plugin path: file://$PLUGIN_LINK"
