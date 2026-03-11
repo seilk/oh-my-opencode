@@ -69,6 +69,8 @@ done
 # =============================================================================
 # Helpers
 # =============================================================================
+die() { echo "ERROR: $*" >&2; exit 1; }
+
 mkdir -p "$LOG_DIR" "$STATE_DIR"
 
 write_patch_failure_report() {
@@ -174,9 +176,11 @@ inject_version() {
 # =============================================================================
 if ! command -v bun >/dev/null 2>&1; then
   echo "=== Installing bun ==="
-  curl -fsSL https://bun.sh/install | bash
+  curl -fsSL https://bun.sh/install | bash \
+    || die "Failed to install bun (network error?)"
   export BUN_INSTALL="$HOME/.bun"
   export PATH="$BUN_INSTALL/bin:$PATH"
+  command -v bun >/dev/null 2>&1 || die "bun not found after installation"
   echo "Bun installed: $(bun --version)"
 fi
 
@@ -199,14 +203,12 @@ if [[ -n "$FLAG_TAG" ]]; then
   echo "Target tag (pinned): $TARGET_TAG"
 else
   echo "=== Querying latest upstream tag ==="
-  TARGET_TAG="$(git ls-remote --tags --sort=-v:refname "$UPSTREAM_URL" 'v[0-9]*' \
-    | grep -v '\^{}$' \
-    | head -1 \
-    | sed 's|.*refs/tags/||')"
+  local_tags="$(git ls-remote --tags --sort=-v:refname "$UPSTREAM_URL" 'v[0-9]*' 2>&1)" \
+    || die "Failed to query upstream tags at $UPSTREAM_URL (network error?)"
+  TARGET_TAG="$(echo "$local_tags" | grep -v '\^{}$' | head -1 | sed 's|.*refs/tags/||')"
 
   if [[ -z "$TARGET_TAG" ]]; then
-    echo "ERROR: No tags found at $UPSTREAM_URL" >&2
-    exit 1
+    die "No tags found at $UPSTREAM_URL"
   fi
   echo "Latest tag: $TARGET_TAG"
 fi
@@ -242,13 +244,15 @@ echo "Build slot: $BUILD_DIR"
 rm -rf "$BUILD_DIR"
 
 echo "=== Cloning $TARGET_TAG (shallow) ==="
-git clone --depth 1 --branch "$TARGET_TAG" "$UPSTREAM_URL" "$BUILD_DIR" 2>&1
+git clone --depth 1 --branch "$TARGET_TAG" "$UPSTREAM_URL" "$BUILD_DIR" 2>&1 \
+  || die "Failed to clone $TARGET_TAG from $UPSTREAM_URL"
 
 # =============================================================================
 # Inject version from tag into package.json
 # =============================================================================
 echo "=== Injecting version: $VERSION ==="
-inject_version "$BUILD_DIR" "$VERSION"
+inject_version "$BUILD_DIR" "$VERSION" \
+  || die "Failed to inject version $VERSION into $BUILD_DIR/package.json"
 
 # =============================================================================
 # Apply patches (sorted glob)
@@ -279,10 +283,12 @@ fi
 # Build
 # =============================================================================
 echo "=== Installing dependencies ==="
-(cd "$BUILD_DIR" && bun install)
+(cd "$BUILD_DIR" && bun install) \
+  || die "bun install failed in $BUILD_DIR"
 
 echo "=== Building ==="
-(cd "$BUILD_DIR" && bun run build)
+(cd "$BUILD_DIR" && bun run build) \
+  || die "bun run build failed in $BUILD_DIR"
 
 # =============================================================================
 # Activate: atomic symlink swap
